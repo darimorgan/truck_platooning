@@ -1,0 +1,28 @@
+.env.local
+.env
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+.DS_Store
+.vscode/
+.idea/
+*.log
+.bags/
+/bags/*
+!/bags/.gitkeep
+
+# Local bag data and generated visualization artifacts
+extracted_images/
+extracted_frames/
+frames/
+visualization_output/
+
+# Hide non-student/admin files from student repo
+DEPLOYMENT_SUMMARY.md
+SETUP_GITHUB_PUSH.md
+tests/

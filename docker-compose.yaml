@@ -1,0 +1,80 @@
+# =============================================================================
+# HSHL Line Following — Docker Compose
+#
+# THREE MODES — pick the one that matches your situation:
+#
+#  MODE 1 · BAG REPLAY (offline, recommended for development)
+#    Plays a pre-recorded drive. No CARLA needed.
+#    Requirement: place the instructor-provided bag in ./bags/
+#    Command:  docker compose --profile bag up --build
+#
+#  MODE 2 · LIVE (connect to instructor's running CARLA in the lab)
+#    The instructor has CARLA + demo-runner running on the same machine.
+#    No extra setup needed — just run from the lab computer.
+#    Command:  docker compose up --build
+#
+
+#
+services:
+  zenoh-router-bag:
+    image: eclipse/zenoh:latest
+    network_mode: host
+    command: --listen tcp/0.0.0.0:7447
+    restart: unless-stopped
+
+
+  bag-replay:
+    build: .
+    network_mode: host
+    shm_size: "512m"
+    environment:
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      - ZENOH_CONNECT_ENDPOINTS=tcp/127.0.0.1:7447
+      - ZENOH_ROUTER_CHECK_ATTEMPTS=30
+      - ROS_DOMAIN_ID=0
+      - ROLE_NAME=${ROLE_NAME:-hero}
+    volumes:
+      - ./bags:/bags:ro
+    command: >
+      bash -c "
+      sleep 2 &&
+      source /opt/ros/humble/setup.bash &&
+      BAG_PATH=$$(ls -d /bags/*/ 2>/dev/null | head -1) &&
+      if [ -z \"$$BAG_PATH\" ]; then
+        echo '------------------------------------------------------------' &&
+        echo 'ERROR: No bag found in ./bags/' &&
+        echo 'Download the bag from the instructor and place it here:' &&
+        echo '  ./bags/session_<date>_<time>/' &&
+        echo '------------------------------------------------------------' &&
+        exit 1;
+      fi &&
+      echo \"Playing bag: $$BAG_PATH\" &&
+      ros2 bag play \"$$BAG_PATH\" --loop
+      "
+    depends_on:
+      - zenoh-router-bag
+
+  line-follower:
+    build: .
+    network_mode: host
+    shm_size: "512m"
+    environment:
+      - RMW_IMPLEMENTATION=rmw_zenoh_cpp
+      - ZENOH_CONNECT_ENDPOINTS=tcp/127.0.0.1:7447
+      - ZENOH_ROUTER_CHECK_ATTEMPTS=30
+      - ROS_DOMAIN_ID=0
+      - ROLE_NAME=${ROLE_NAME:-hero}
+      - DEFAULT_THROTTLE=${DEFAULT_THROTTLE:-0.35}
+      - PYTHONPATH=/app
+    depends_on:
+      - zenoh-router-bag
+    command: >
+      bash -c "
+      sleep 2 &&
+      source /opt/ros/humble/setup.bash &&
+      python3 -c 'from line_following_solution.my_line_follower import main; main()'
+      "
+    # ── Live code editing (no rebuild needed) ─────────────────────────────
+    # Uncomment the two lines below, then restart: docker compose up --build
+    # volumes:
+    #   - ./line_following_solution:/app/line_following_solution
