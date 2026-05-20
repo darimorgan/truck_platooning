@@ -1,0 +1,17 @@
+.git/
+.venv/
+__pycache__/
+**/__pycache__/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+bags/
+extracted_frames/
+extracted_images/
+visualization_output/
+
+*.ipynb
+labelled_data.csv
+svm_green_line_model_updated.joblib
+
+.DS_Store

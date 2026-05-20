@@ -1,4 +1,4 @@
-from ros:humble-ros-base
+FROM ros:humble-ros-base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install --no-cache-dir \
     numpy \
     opencv-python \
+    pandas \
+    scikit-learn==1.7.2 \
+    joblib \
     pytest
 
 # Setup workspace
