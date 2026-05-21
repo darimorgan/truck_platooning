@@ -53,33 +53,42 @@ import numpy as np  # type: ignore
 import pandas as pd # type: ignore
 import rclpy        # type: ignore
 
+from .controller import LineFollowerConfig, detect_green_line
 from .interface import LineFollowingInterface
 
 
 @dataclass(frozen=True)
-class LineFollowerConfig:
-    """Fixed parameters for feature extraction and steering smoothing."""
+class SvmFeatureConfig:
+    """Fixed parameters for SVM diagnostic feature extraction."""
 
     kernel_size: tuple[int, int] = (7, 7)
     min_green_pixels: int = 150
     min_pixels_per_band: int = 12
-    steering_step: float = 0.04
-    steering_decay: float = 0.96
-    steering_deadband: float = 0.02
+
+
+@dataclass(frozen=True)
+class FallbackConfig:
+    """Fixed parameters for short line-loss steering fallback."""
+
+    hold_frames: int = 15
+    decay: float = 0.95
+    zero_deadband: float = 0.000002
 
 
 class MyLineFollower(LineFollowingInterface):
     """
     Student implementation of line following.
 
-    Detect a green line, classify its direction with the trained SVM, and
-    update steering gradually from that discrete prediction.
+    Drive from the deterministic contour controller and compare its direction
+    against the trained SVM prediction for diagnostics.
     """
 
     def __init__(self):
         super().__init__("my_line_follower")
 
         self.config = LineFollowerConfig()
+        self.svm_feature_config = SvmFeatureConfig()
+        self.fallback_config = FallbackConfig()
         model_path = Path(__file__).resolve().parents[1] / "svm_green_line_model.joblib"
         payload = joblib.load(model_path)
 
@@ -89,12 +98,13 @@ class MyLineFollower(LineFollowingInterface):
         self.hsv_upper = np.array(payload["hsv_upper"], dtype=np.uint8)
         self.roi_start_fraction = float(payload["roi_start_fraction"])
 
-        self.current_steer = 0.0
         self._frame_count = 0
+        self._last_controller_steering = 0.0
+        self._missed_line_frames = 0
 
         # Register camera callback
         self.on_camera_image(self.detect_line)
-        self.get_logger().info("MyLineFollower initialized — SVM model loaded")
+        self.get_logger().info("MyLineFollower initialized — controller active, SVM diagnostics loaded")
 
     def create_green_mask(self, image_bgr: np.ndarray) -> tuple[np.ndarray, int]:
         """Return a denoised binary mask for the green route line in the lower ROI."""
@@ -105,7 +115,7 @@ class MyLineFollower(LineFollowingInterface):
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.hsv_lower, self.hsv_upper)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.config.kernel_size)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, self.svm_feature_config.kernel_size)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
@@ -116,7 +126,7 @@ class MyLineFollower(LineFollowingInterface):
         band = mask[y0:y1, :]
         _, xs = np.nonzero(band)
 
-        if len(xs) < self.config.min_pixels_per_band:
+        if len(xs) < self.svm_feature_config.min_pixels_per_band:
             return np.nan, int(len(xs))
 
         return float(xs.mean()), int(len(xs))
@@ -133,7 +143,7 @@ class MyLineFollower(LineFollowingInterface):
         mask, roi_start = self.create_green_mask(image_bgr)
         green_pixels = int(np.count_nonzero(mask))
 
-        if green_pixels < self.config.min_green_pixels:
+        if green_pixels < self.svm_feature_config.min_green_pixels:
             return None, mask, roi_start
 
         roi_h = mask.shape[0]
@@ -203,21 +213,21 @@ class MyLineFollower(LineFollowingInterface):
         x = self.features_to_frame(features)
         return str(self.model.predict(x)[0])
 
-    def update_steering(self, prediction: str) -> float:
-        """Update steering gradually from the discrete SVM prediction."""
-        if prediction == "LEFT":
-            self.current_steer -= self.config.steering_step
-        elif prediction == "RIGHT":
-            self.current_steer += self.config.steering_step
-        else:
-            self.current_steer *= self.config.steering_decay
+    def controller_direction(self, steering: float) -> str:
+        """Convert deterministic steering into a direction label."""
+        if steering < -self.config.steering_deadband:
+            return "LEFT"
+        if steering > self.config.steering_deadband:
+            return "RIGHT"
+        return "STRAIGHT"
 
-        self.current_steer = float(np.clip(self.current_steer, -1.0, 1.0))
+    def svm_prediction_for_frame(self, image: np.ndarray) -> str | None:
+        """Return the SVM direction prediction, or None if features are unavailable."""
+        features, _, _ = self.extract_centerline_features(image)
+        if features is None:
+            return None
 
-        if abs(self.current_steer) < self.config.steering_deadband:
-            self.current_steer = 0.0
-
-        return self.current_steer
+        return self.predict_direction(features)
 
     def detect_line(self, image: np.ndarray) -> float | None:
         """
@@ -229,20 +239,50 @@ class MyLineFollower(LineFollowingInterface):
         Returns:
             Steering value in [-1.0, 1.0], or None if line not detected.
         """
-        features, _, _ = self.extract_centerline_features(image)
-        if features is None:
-            self.show_notification("No line detected")
-            return None
+        detection = detect_green_line(image, self.config)
+        if detection.steering is None:
+            fallback_steering = self._last_controller_steering
+            if self._missed_line_frames >= self.fallback_config.hold_frames:
+                fallback_steering *= self.fallback_config.decay
 
-        prediction = self.predict_direction(features)
-        steering = self.update_steering(prediction)
+            if abs(fallback_steering) < self.fallback_config.zero_deadband:
+                fallback_steering = 0.0
+
+            self._last_controller_steering = fallback_steering
+            self._missed_line_frames += 1
+            self._frame_count += 1
+            if self._frame_count % 30 == 0:
+                self.get_logger().info(
+                    f"controller={detection.status} fallback_steer={fallback_steering:.6f} "
+                    f"missed_frames={self._missed_line_frames} "
+                    f"frame={self._frame_count}"
+                )
+            self.show_notification(f"controller={detection.status} fallback={fallback_steering:.2f}")
+            return fallback_steering
+
+        steering = detection.steering
+        self._last_controller_steering = steering
+        self._missed_line_frames = 0
+        controller_prediction = self.controller_direction(steering)
+        svm_prediction = self.svm_prediction_for_frame(image)
+        if svm_prediction is None:
+            svm_status = "unavailable"
+        elif svm_prediction == controller_prediction:
+            svm_status = "accepted"
+        else:
+            svm_status = "declined"
 
         self._frame_count += 1
         if self._frame_count % 30 == 0:
             self.get_logger().info(
-                f"pred={prediction} steer={steering:.2f} frame={self._frame_count}"
+                f"ctrl={controller_prediction} svm={svm_prediction or 'NONE'} "
+                f"svm_status={svm_status} steer={steering:.2f} "
+                f"line_x={detection.line_center_x:.1f} frame={self._frame_count}"
             )
-        self.show_notification(f"pred={prediction} steer={steering:.2f}")
+        self.show_notification(
+            f"ctrl={controller_prediction} svm={svm_prediction or 'NONE'} "
+            f"{svm_status} steer={steering:.2f}"
+        )
 
         return steering
 
