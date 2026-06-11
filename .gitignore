@@ -26,6 +26,7 @@ visualization_output/
 DEPLOYMENT_SUMMARY.md
 SETUP_GITHUB_PUSH.md
 tests/
+test_*
 
 # Notebooks
  .ipynb_checkpoints/
