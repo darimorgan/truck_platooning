@@ -10,6 +10,12 @@ const int DISTANCE_CLOSING_DEADLINE = 500;
 const int UNSAFE_DISTANCE_REACTION_DEADLINE = 100;
 const int STALE_MESSAGE_TIMEOUT = 300;
 const int DEGRADED_ACTION_DEADLINE = 500;
+const int SVM_PERIOD = 100;
+const int LANE_LOSS_REACTION_DEADLINE = 100;
+const int SVM_LEFT = 0;
+const int SVM_STRAIGHT = 1;
+const int SVM_RIGHT = 2;
+const int SVM_LOST = 3;
 
 // Clocks
 clock join_clock;
@@ -19,12 +25,13 @@ clock control_clock;
 clock unsafe_distance_clock;
 clock stale_clock;
 clock degraded_clock;
+clock svm_clock;
+clock lane_loss_clock;
 
 // Handshake channels
 chan join_req;
 chan join_ok;
 chan join_fail;
-chan degraded_on;
 chan safe_exit_req;
 chan return_normal;
 
@@ -32,6 +39,8 @@ chan return_normal;
 broadcast chan enter_platooning;
 broadcast chan status_msg;
 broadcast chan emergency_brake;
+broadcast chan degraded_on;
+broadcast chan lane_lost;
 
 // State variables
 bool platoon_active = false;
@@ -41,6 +50,10 @@ bool braking = false;
 bool accel_blocked = false;
 bool gap_safe = true;
 bool speed_reducing = false;
+bool svm_active = false;
+bool lane_ok = true;
+bool lane_following_active = false;
+int[0,3] svm_lane_class = SVM_STRAIGHT;
 </declaration>
 	<template>
 		<name>LeaderTruck</name>
@@ -132,8 +145,8 @@ bool speed_reducing = false;
 			<label kind="invariant" x="-782" y="-76">join_clock &lt;= JOIN_RESPONSE_DEADLINE</label>
 		</location>
 		<location id="id16" x="-50" y="-100">
-			<name x="-105" y="-135">ClosingGap</name>
-			<label kind="invariant" x="-195" y="-68">close_gap_clock &lt;= DISTANCE_CLOSING_DEADLINE</label>
+			<name x="-76" y="-136">ClosingGap</name>
+			<label kind="invariant" x="-187" y="-76">close_gap_clock &lt;= DISTANCE_CLOSING_DEADLINE</label>
 		</location>
 		<location id="id17" x="350" y="-100">
 			<name x="315" y="-135">Following</name>
@@ -142,26 +155,30 @@ bool speed_reducing = false;
 			<name x="650" y="-135">Degraded</name>
 		</location>
 		<location id="id19" x="700" y="120">
-			<name x="665" y="145">SafeExit</name>
+			<name x="612" y="136">SafeExit</name>
 		</location>
 		<location id="id20" x="1139" y="-102">
 			<name x="1069" y="-137">EmergencyBraking</name>
 		</location>
+		<location id="id21" x="348" y="246">
+			<name x="178" y="221">LaneLostSafeMode</name>
+			<label kind="invariant" x="-76" y="246">lane_loss_clock &lt;= LANE_LOSS_REACTION_DEADLINE</label>
+		</location>
 		<init ref="id14"/>
-		<transition id="id21">
+		<transition id="id22">
 			<source ref="id14"/>
 			<target ref="id15"/>
 			<label kind="synchronisation" x="-707" y="-127">join_req!</label>
 			<label kind="assignment" x="-707" y="-102">join_clock = 0</label>
 		</transition>
-		<transition id="id22">
+		<transition id="id23">
 			<source ref="id15"/>
 			<target ref="id16"/>
-			<label kind="guard" x="-382" y="-144">join_clock &lt;= JOIN_RESPONSE_DEADLINE</label>
-			<label kind="synchronisation" x="-280" y="-127">join_ok?</label>
-			<label kind="assignment" x="-323" y="-102">close_gap_clock = 0</label>
+			<label kind="guard" x="-399" y="-144">join_clock &lt;= JOIN_RESPONSE_DEADLINE</label>
+			<label kind="synchronisation" x="-306" y="-127">join_ok?</label>
+			<label kind="assignment" x="-348" y="-102">close_gap_clock = 0</label>
 		</transition>
-		<transition id="id23">
+		<transition id="id24">
 			<source ref="id15"/>
 			<target ref="id14"/>
 			<label kind="guard" x="-707" y="-262">join_clock &lt;= JOIN_RESPONSE_DEADLINE</label>
@@ -169,34 +186,41 @@ bool speed_reducing = false;
 			<nail x="-457" y="-232"/>
 			<nail x="-807" y="-232"/>
 		</transition>
-		<transition id="id24">
+		<transition id="id25">
 			<source ref="id16"/>
 			<target ref="id17"/>
-			<label kind="guard" x="0" y="-144">close_gap_clock &lt;= DISTANCE_CLOSING_DEADLINE</label>
-			<label kind="synchronisation" x="70" y="-125">enter_platooning!</label>
+			<label kind="guard" x="-17" y="-161">close_gap_clock &lt;= DISTANCE_CLOSING_DEADLINE</label>
+			<label kind="synchronisation" x="68" y="-136">enter_platooning!</label>
 			<label kind="assignment" x="50" y="-100">platoon_active = true</label>
 		</transition>
-		<transition id="id25">
+		<transition id="id26">
 			<source ref="id17"/>
 			<target ref="id18"/>
 			<label kind="synchronisation" x="455" y="-125">degraded_on?</label>
-			<label kind="assignment" x="-17" y="136">platoon_active = false, degraded = true, accel_blocked = true</label>
-		</transition>
-		<transition id="id26">
-			<source ref="id18"/>
-			<target ref="id17"/>
-			<label kind="synchronisation" x="459" y="-25">return_normal?</label>
-			<label kind="assignment" x="204" y="8">platoon_active = true, degraded = false, accel_blocked = false</label>
-			<nail x="700" y="0"/>
-			<nail x="350" y="0"/>
+			<label kind="assignment" x="425" y="-93">platoon_active = false, 
+degraded = true,
+accel_blocked = true</label>
 		</transition>
 		<transition id="id27">
 			<source ref="id18"/>
-			<target ref="id19"/>
-			<label kind="synchronisation" x="705" y="51">safe_exit_req?</label>
-			<label kind="assignment" x="705" y="68">degraded = false, platoon_active = false, accel_blocked = true</label>
+			<target ref="id17"/>
+			<label kind="synchronisation" x="459" y="-25">return_normal?</label>
+			<label kind="assignment" x="425" y="8">platoon_active = true, 
+degraded = false, 
+accel_blocked = !gap_safe 
+|| !lane_ok</label>
+			<nail x="700" y="0"/>
+			<nail x="350" y="0"/>
 		</transition>
 		<transition id="id28">
+			<source ref="id18"/>
+			<target ref="id19"/>
+			<label kind="synchronisation" x="705" y="0">safe_exit_req?</label>
+			<label kind="assignment" x="705" y="25">degraded = false, 
+platoon_active = false, 
+accel_blocked = true</label>
+		</transition>
+		<transition id="id29">
 			<source ref="id17"/>
 			<target ref="id20"/>
 			<label kind="synchronisation" x="625" y="-250">emergency_brake?</label>
@@ -204,47 +228,76 @@ bool speed_reducing = false;
 			<nail x="350" y="-220"/>
 			<nail x="1139" y="-221"/>
 		</transition>
-		<transition id="id29">
+		<transition id="id30">
 			<source ref="id18"/>
 			<target ref="id20"/>
 			<label kind="synchronisation" x="800" y="-125">emergency_brake?</label>
-			<label kind="assignment" x="714" y="-85">degraded = false, braking = true, accel_blocked = true</label>
+			<label kind="assignment" x="816" y="-93">degraded = false, 
+braking = true, 
+accel_blocked = true</label>
+		</transition>
+		<transition id="id31">
+			<source ref="id17"/>
+			<target ref="id21"/>
+			<label kind="synchronisation" x="204" y="76">lane_lost?</label>
+			<label kind="assignment" x="153" y="93">platoon_active = false,
+lane_ok = false,
+lane_following_active = false, 
+lane_loss_clock = 0, 
+accel_blocked = true</label>
+			<nail x="350" y="120"/>
+		</transition>
+		<transition id="id32">
+			<source ref="id21"/>
+			<target ref="id19"/>
+			<label kind="guard" x="391" y="221">lane_loss_clock &lt;= LANE_LOSS_REACTION_DEADLINE</label>
+			<label kind="assignment" x="433" y="255">lane_following_active = false, 
+platoon_active = false, 
+accel_blocked = true</label>
+			<nail x="697" y="246"/>
+			<nail x="700" y="240"/>
+		</transition>
+		<transition id="id33">
+			<source ref="id19"/>
+			<target ref="id19"/>
+			<nail x="714" y="161"/>
+			<nail x="773" y="161"/>
+			<nail x="773" y="119"/>
 		</transition>
 	</template>
 	<template>
 		<name>CommunicationLink</name>
-		<location id="id30" x="-600" y="-100">
+		<location id="id34" x="-600" y="-100">
 			<name x="-625" y="-135">Idle</name>
 		</location>
-		<location id="id31" x="-250" y="-100">
+		<location id="id35" x="-250" y="-100">
 			<name x="-289" y="-144">Monitoring</name>
 			<label kind="invariant" x="-450" y="-76">stale_clock &lt;= STALE_MESSAGE_TIMEOUT</label>
 		</location>
-		<location id="id32" x="150" y="-100">
+		<location id="id36" x="150" y="-100">
 			<name x="105" y="-135">StaleData</name>
-			<label kind="invariant" x="-42" y="-59">degraded_clock &lt;= DEGRADED_ACTION_DEADLINE</label>
+			<label kind="invariant" x="-221" y="-42">degraded_clock &lt;= DEGRADED_ACTION_DEADLINE</label>
 		</location>
-		<location id="id33" x="603" y="-102">
+		<location id="id37" x="603" y="-102">
 			<name x="528" y="-137">DegradedCommunication</name>
 		</location>
-		<location id="id34" x="900" y="-100">
-			<name x="909" y="-136">Restored</name>
+		<location id="id38" x="900" y="-100">
+			<name x="918" y="-136">Restored</name>
 			<committed/>
 		</location>
-		<location id="id35" x="603" y="110">
+		<location id="id39" x="603" y="110">
 			<name x="568" y="135">SafeExit</name>
-			<committed/>
 		</location>
-		<init ref="id30"/>
-		<transition id="id36">
-			<source ref="id30"/>
-			<target ref="id31"/>
+		<init ref="id34"/>
+		<transition id="id40">
+			<source ref="id34"/>
+			<target ref="id35"/>
 			<label kind="synchronisation" x="-500" y="-125">enter_platooning?</label>
 			<label kind="assignment" x="-552" y="-102">stale_clock = 0, comm_ok = true</label>
 		</transition>
-		<transition id="id37">
-			<source ref="id31"/>
-			<target ref="id31"/>
+		<transition id="id41">
+			<source ref="id35"/>
+			<target ref="id35"/>
 			<label kind="synchronisation" x="-170" y="-161">status_msg?</label>
 			<label kind="assignment" x="-221" y="-187">stale_clock = 0, comm_ok = true</label>
 			<nail x="-250" y="-220"/>
@@ -252,116 +305,242 @@ bool speed_reducing = false;
 			<nail x="-80" y="-160"/>
 			<nail x="-250" y="-160"/>
 		</transition>
-		<transition id="id38">
-			<source ref="id31"/>
-			<target ref="id32"/>
-			<label kind="guard" x="-187" y="-17">stale_clock &gt;= STALE_MESSAGE_TIMEOUT</label>
-			<label kind="assignment" x="-187" y="17">comm_ok = false, degraded_clock = 0</label>
+		<transition id="id42">
+			<source ref="id35"/>
+			<target ref="id36"/>
+			<label kind="guard" x="-195" y="-17">stale_clock &gt;= STALE_MESSAGE_TIMEOUT</label>
+			<label kind="assignment" x="-195" y="17">comm_ok = false, degraded_clock = 0</label>
 			<nail x="-250" y="10"/>
 			<nail x="150" y="10"/>
 		</transition>
-		<transition id="id39">
-			<source ref="id32"/>
-			<target ref="id33"/>
+		<transition id="id43">
+			<source ref="id36"/>
+			<target ref="id37"/>
 			<label kind="guard" x="221" y="-161">degraded_clock &lt;= DEGRADED_ACTION_DEADLINE</label>
 			<label kind="synchronisation" x="297" y="-127">degraded_on!</label>
 			<label kind="assignment" x="204" y="-102">degraded = true, accel_blocked = true</label>
 		</transition>
-		<transition id="id40">
-			<source ref="id33"/>
-			<target ref="id34"/>
+		<transition id="id44">
+			<source ref="id37"/>
+			<target ref="id38"/>
 			<label kind="synchronisation" x="688" y="-119">return_normal!</label>
-			<label kind="assignment" x="646" y="-85">degraded = false, comm_ok = true, stale_clock = 0, accel_blocked = false</label>
+			<label kind="assignment" x="671" y="-93">degraded = false, 
+comm_ok = true, 
+stale_clock = 0, accel_blocked = !gap_safe || !lane_ok</label>
 		</transition>
-		<transition id="id41">
-			<source ref="id34"/>
-			<target ref="id31"/>
+		<transition id="id45">
+			<source ref="id38"/>
+			<target ref="id35"/>
 			<nail x="900" y="-220"/>
 			<nail x="-250" y="-220"/>
 		</transition>
-		<transition id="id42">
-			<source ref="id33"/>
-			<target ref="id35"/>
-			<label kind="synchronisation" x="612" y="8">safe_exit_req!</label>
-			<label kind="assignment" x="612" y="25">degraded = false, platoon_active = false, accel_blocked = true</label>
+		<transition id="id46">
+			<source ref="id37"/>
+			<target ref="id39"/>
+			<label kind="synchronisation" x="612" y="0">safe_exit_req!</label>
+			<label kind="assignment" x="612" y="17">degraded = false, 
+platoon_active = false, 
+accel_blocked = true</label>
+		</transition>
+		<transition id="id47">
+			<source ref="id39"/>
+			<target ref="id39"/>
+			<nail x="603" y="190"/>
+			<nail x="680" y="190"/>
+			<nail x="680" y="110"/>
 		</transition>
 	</template>
 	<template>
 		<name>SafetyController</name>
-		<location id="id43" x="-700" y="-100">
+		<location id="id48" x="-700" y="-100">
 			<name x="-725" y="-135">Idle</name>
 		</location>
-		<location id="id44" x="-350" y="-100">
-			<name x="-410" y="-135">WaitStatus</name>
+		<location id="id49" x="-350" y="-100">
+			<name x="-340" y="-136">WaitStatus</name>
 			<label kind="invariant" x="-465" y="-70">control_clock &lt;= CONTROL_PERIOD</label>
 		</location>
-		<location id="id45" x="0" y="-100">
-			<name x="-45" y="-135">CheckGap</name>
+		<location id="id50" x="0" y="-100">
+			<name x="-76" y="-136">CheckGap</name>
 			<committed/>
 		</location>
-		<location id="id46" x="350" y="-250">
-			<name x="305" y="-285">SafeGap</name>
+		<location id="id51" x="350" y="-250">
+			<name x="280" y="-280">SafeGap</name>
 		</location>
-		<location id="id47" x="350" y="80">
-			<name x="300" y="105">UnsafeGap</name>
-			<label kind="invariant" x="230" y="130">unsafe_distance_clock &lt;= UNSAFE_DISTANCE_REACTION_DEADLINE</label>
+		<location id="id52" x="350" y="80">
+			<name x="297" y="93">UnsafeGap</name>
+			<label kind="invariant" x="110" y="119">unsafe_distance_clock &lt;= UNSAFE_DISTANCE_REACTION_DEADLINE</label>
 		</location>
-		<location id="id48" x="750" y="80">
-			<name x="705" y="105">ReduceSpeed</name>
+		<location id="id53" x="750" y="80">
+			<name x="773" y="68">ReduceSpeed</name>
 		</location>
-		<location id="id49" x="750" y="-250">
+		<location id="id54" x="750" y="-250">
 			<name x="680" y="-285">EmergencyBraking</name>
 		</location>
-		<init ref="id43"/>
-		<transition id="id50">
-			<source ref="id43"/>
-			<target ref="id44"/>
-			<label kind="synchronisation" x="-600" y="-125">enter_platooning?</label>
-			<label kind="assignment" x="-600" y="-100">control_clock = 0, gap_safe = true</label>
+		<init ref="id48"/>
+		<transition id="id55">
+			<source ref="id48"/>
+			<target ref="id49"/>
+			<label kind="synchronisation" x="-612" y="-127">enter_platooning?</label>
+			<label kind="assignment" x="-612" y="-93">control_clock = 0, 
+gap_safe = true</label>
 		</transition>
-		<transition id="id51">
-			<source ref="id44"/>
-			<target ref="id45"/>
-			<label kind="synchronisation" x="-230" y="-125">status_msg?</label>
+		<transition id="id56">
+			<source ref="id49"/>
+			<target ref="id50"/>
+			<label kind="synchronisation" x="-212" y="-127">status_msg?</label>
 			<label kind="assignment" x="-230" y="-100">control_clock = 0</label>
 		</transition>
-		<transition id="id52">
-			<source ref="id45"/>
-			<target ref="id46"/>
-			<label kind="assignment" x="120" y="-230">gap_safe = true, accel_blocked = false, speed_reducing = false</label>
+		<transition id="id57">
+			<source ref="id49"/>
+			<target ref="id50"/>
+			<label kind="guard" x="-306" y="0">control_clock &gt;= CONTROL_PERIOD</label>
+			<label kind="assignment" x="-255" y="17">control_clock = 0</label>
+			<nail x="-350" y="40"/>
+			<nail x="0" y="40"/>
+		</transition>
+		<transition id="id58">
+			<source ref="id50"/>
+			<target ref="id51"/>
+			<label kind="assignment" x="25" y="-238">gap_safe = true, accel_blocked = true 
+|| !lane_ok, speed_reducing = !lane_ok</label>
 			<nail x="0" y="-250"/>
 		</transition>
-		<transition id="id53">
-			<source ref="id45"/>
-			<target ref="id47"/>
-			<label kind="assignment" x="120" y="30">gap_safe = false, unsafe_distance_clock = 0, accel_blocked = true</label>
-			<nail x="0" y="80"/>
+		<transition id="id59">
+			<source ref="id50"/>
+			<target ref="id52"/>
+			<label kind="assignment" x="76" y="-93">gap_safe = false, 
+unsafe_distance_clock = 0, 
+accel_blocked = true</label>
+			<nail x="348" y="-102"/>
 		</transition>
-		<transition id="id54">
-			<source ref="id46"/>
-			<target ref="id44"/>
-			<label kind="assignment" x="-70" y="-300">control_clock = 0</label>
+		<transition id="id60">
+			<source ref="id51"/>
+			<target ref="id49"/>
+			<label kind="assignment" x="-51" y="-357">control_clock = 0</label>
 			<nail x="350" y="-330"/>
 			<nail x="-350" y="-330"/>
 		</transition>
-		<transition id="id55">
-			<source ref="id47"/>
-			<target ref="id48"/>
-			<label kind="guard" x="480" y="40">unsafe_distance_clock &lt;= UNSAFE_DISTANCE_REACTION_DEADLINE</label>
-			<label kind="assignment" x="480" y="65">speed_reducing = true</label>
+		<transition id="id61">
+			<source ref="id52"/>
+			<target ref="id53"/>
+			<label kind="guard" x="365" y="34">unsafe_distance_clock &lt;= UNSAFE_DISTANCE_REACTION_DEADLINE</label>
+			<label kind="assignment" x="476" y="59">speed_reducing = true</label>
 		</transition>
-		<transition id="id56">
-			<source ref="id48"/>
-			<target ref="id44"/>
-			<label kind="assignment" x="120" y="180">control_clock = 0, gap_safe = true</label>
+		<transition id="id62">
+			<source ref="id53"/>
+			<target ref="id49"/>
+			<label kind="assignment" x="93" y="187">control_clock = 0, gap_safe = true</label>
 			<nail x="750" y="180"/>
 			<nail x="-350" y="180"/>
 		</transition>
-		<transition id="id57">
-			<source ref="id48"/>
-			<target ref="id49"/>
-			<label kind="synchronisation" x="770" y="-90">emergency_brake!</label>
-			<label kind="assignment" x="770" y="-65">braking = true, platoon_active = false, accel_blocked = true</label>
+		<transition id="id63">
+			<source ref="id53"/>
+			<target ref="id54"/>
+			<label kind="synchronisation" x="765" y="-153">emergency_brake!</label>
+			<label kind="assignment" x="765" y="-127">braking = true, 
+platoon_active = false, 
+accel_blocked = true</label>
+		</transition>
+	</template>
+	<template>
+		<name>SVMLineFollower</name>
+		<location id="id64" x="-500" y="-100">
+			<name x="-525" y="-135">Idle</name>
+		</location>
+		<location id="id65" x="-150" y="-100">
+			<name x="-187" y="-144">Classify</name>
+			<committed/>
+		</location>
+		<location id="id66" x="250" y="-280">
+			<name x="280" y="-297">SteerLeft</name>
+			<label kind="invariant" x="272" y="-272">svm_clock &lt;= SVM_PERIOD</label>
+		</location>
+		<location id="id67" x="250" y="-100">
+			<name x="280" y="-110">SteerStraight</name>
+			<label kind="invariant" x="289" y="-93">svm_clock &lt;= SVM_PERIOD</label>
+		</location>
+		<location id="id68" x="250" y="80">
+			<name x="314" y="76">SteerRight</name>
+			<label kind="invariant" x="289" y="102">svm_clock &lt;= SVM_PERIOD</label>
+		</location>
+		<location id="id69" x="250" y="260">
+			<name x="212" y="221">LaneLost</name>
+			<committed/>
+		</location>
+		<location id="id70" x="650" y="260">
+			<name x="603" y="221">LossReported</name>
+		</location>
+		<init ref="id64"/>
+		<transition id="id71">
+			<source ref="id64"/>
+			<target ref="id65"/>
+			<label kind="synchronisation" x="-405" y="-125">enter_platooning?</label>
+			<label kind="assignment" x="-467" y="-93">svm_clock = 0, svm_active = true, 
+lane_following_active = true, 
+lane_ok = true, 
+svm_lane_class = SVM_STRAIGHT</label>
+		</transition>
+		<transition id="id72">
+			<source ref="id65"/>
+			<target ref="id66"/>
+			<label kind="assignment" x="-127" y="-323">svm_clock = 0, svm_lane_class = SVM_LEFT, 
+lane_ok = true</label>
+			<nail x="-150" y="-280"/>
+		</transition>
+		<transition id="id73">
+			<source ref="id65"/>
+			<target ref="id67"/>
+			<label kind="assignment" x="-93" y="-153">svm_clock = 0, svm_lane_class = SVM_STRAIGHT, 
+lane_ok = true</label>
+		</transition>
+		<transition id="id74">
+			<source ref="id65"/>
+			<target ref="id68"/>
+			<label kind="assignment" x="-144" y="42">svm_clock = 0, svm_lane_class = SVM_RIGHT, lane_ok = true</label>
+			<nail x="-150" y="80"/>
+		</transition>
+		<transition id="id75">
+			<source ref="id65"/>
+			<target ref="id69"/>
+			<label kind="assignment" x="-153" y="263">svm_lane_class = SVM_LOST, 
+lane_ok = false, 
+accel_blocked = true, speed_reducing = true</label>
+			<nail x="-150" y="260"/>
+		</transition>
+		<transition id="id76">
+			<source ref="id66"/>
+			<target ref="id65"/>
+			<label kind="guard" x="-90" y="-365">svm_clock &gt;= SVM_PERIOD</label>
+			<nail x="250" y="-370"/>
+			<nail x="-150" y="-370"/>
+		</transition>
+		<transition id="id77">
+			<source ref="id67"/>
+			<target ref="id65"/>
+			<label kind="guard" x="-68" y="-42">svm_clock &gt;= SVM_PERIOD</label>
+			<nail x="250" y="-20"/>
+			<nail x="-150" y="-20"/>
+		</transition>
+		<transition id="id78">
+			<source ref="id68"/>
+			<target ref="id65"/>
+			<label kind="guard" x="-68" y="153">svm_clock &gt;= SVM_PERIOD</label>
+			<nail x="250" y="180"/>
+			<nail x="-150" y="180"/>
+		</transition>
+		<transition id="id79">
+			<source ref="id69"/>
+			<target ref="id70"/>
+			<label kind="synchronisation" x="360" y="235">lane_lost!</label>
+			<label kind="assignment" x="340" y="272">lane_following_active = false, 
+lane_loss_clock = 0</label>
+		</transition>
+		<transition id="id80">
+			<source ref="id70"/>
+			<target ref="id70"/>
+			<nail x="650" y="340"/>
+			<nail x="730" y="340"/>
+			<nail x="730" y="260"/>
 		</transition>
 	</template>
 	<system>
@@ -369,90 +548,45 @@ Lead = LeaderTruck();
 Follower = FollowerTruck();
 Comm = CommunicationLink();
 Safety = SafetyController();
+SVM = SVMLineFollower();
 
-system Lead, Follower, Comm, Safety;
+system Lead, Follower, Comm, Safety, SVM;
 </system>
 	<queries>
 		<query>
 			<formula>A[] not deadlock</formula>
 			<comment>No deadlock.</comment>
-		</query>
-		<query>
-			<formula>A[] (Lead.EvaluateJoin imply join_clock &lt;= JOIN_RESPONSE_DEADLINE)</formula>
-			<comment>Join response time</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 22:07:17 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>A[] (Follower.ClosingGap imply close_gap_clock &lt;= DISTANCE_CLOSING_DEADLINE)</formula>
-			<comment>Gap closing time</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:22 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>A[] (Lead.Platooning imply control_msg_clock &lt;= CONTROL_MESSAGE_PERIOD)</formula>
-			<comment/>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:23 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>A[] (Comm.Monitoring imply stale_clock &lt;= STALE_MESSAGE_TIMEOUT)</formula>
-			<comment>Communication timeout</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:25 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>A[] (Comm.StaleData imply degraded_clock &lt;= DEGRADED_ACTION_DEADLINE)</formula>
-			<comment>Degraded mode starts </comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:26 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>A[] (Follower.Degraded imply accel_blocked)</formula>
-			<comment>Acceleration is forbiden in degraded mode.</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:27 +0300">
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:29:45 +0300">
 			</result>
 		</query>
 		<query>
 			<formula>A[] (Safety.UnsafeGap imply accel_blocked)</formula>
-			<comment>Unsafe gap blocks acceleration</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:28 +0300">
+			<comment>Unsafe gap blocks acceleration.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:22:40 +0300">
 			</result>
 		</query>
 		<query>
-			<formula>A[] (Safety.ReduceSpeed imply speed_reducing)</formula>
-			<comment>Unsafe gap leads to speed reduction</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:29 +0300">
+			<formula>A[] (Safety.EmergencyBraking imply !platoon_active)</formula>
+			<comment>Emergency braking stops platooning.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:22:41 +0300">
 			</result>
 		</query>
 		<query>
-			<formula>A[] (Follower.EmergencyBraking imply !platoon_active)</formula>
-			<comment>Emergency braking stops platooning</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:29 +0300">
+			<formula>A[] (Comm.StaleData imply degraded_clock &lt;= DEGRADED_ACTION_DEADLINE)</formula>
+			<comment>Communication degraded action deadline.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:22:42 +0300">
 			</result>
 		</query>
 		<query>
-			<formula>E&lt;&gt; Follower.Following</formula>
-			<comment>Normal platooning</comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 21:44:30 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>E&lt;&gt; Comm.DegradedCommunication</formula>
-			<comment>Degraded communication </comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 22:07:11 +0300">
-			</result>
-		</query>
-		<query>
-			<formula>E&lt;&gt; Follower.SafeExit</formula>
-			<comment>Safe exit </comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 22:07:13 +0300">
+			<formula>A[] (!lane_ok imply accel_blocked)</formula>
+			<comment>Lane loss blocks acceleration.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:22:43 +0300">
 			</result>
 		</query>
 		<query>
 			<formula>E&lt;&gt; Safety.EmergencyBraking</formula>
-			<comment>Emergency braking </comment>
-			<result outcome="success" type="quality" timestamp="2026-06-18 22:07:15 +0300">
+			<comment>Emergency braking is reachable.</comment>
+			<result outcome="success" type="quality" timestamp="2026-07-02 23:22:44 +0300">
 			</result>
 		</query>
 	</queries>
